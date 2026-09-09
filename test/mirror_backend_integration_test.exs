@@ -56,7 +56,7 @@ defmodule DurableServer.MirrorBackendIntegrationTest do
       do: StorageBackend.unsubscribe(delegate, subscription_ref)
   end
 
-  @moduletag :integration
+  @moduletag :ekv
   @moduletag :capture_log
 
   setup do
