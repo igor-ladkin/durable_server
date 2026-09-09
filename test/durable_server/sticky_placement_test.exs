@@ -906,25 +906,6 @@ defmodule DurableServer.StickyPlacementTest do
     end
   end
 
-  defp assert_eventually(fun, timeout \\ 2_000) when is_function(fun, 0) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_assert_eventually(fun, deadline)
-  end
-
-  defp do_assert_eventually(fun, deadline) do
-    cond do
-      fun.() ->
-        :ok
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("condition was not met within timeout")
-
-      true ->
-        Process.sleep(25)
-        do_assert_eventually(fun, deadline)
-    end
-  end
-
   defp restore_env(key, nil), do: System.delete_env(key)
   defp restore_env(key, value), do: System.put_env(key, value)
 end
