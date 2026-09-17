@@ -129,6 +129,38 @@ defmodule DurableServer.RemotePlacementTest do
       assert length(nodes) <= 1
     end
 
+    test "excludes remote nodes with zero capacity for the module", %{
+      supervisor_name: supervisor_name,
+      prefix: prefix
+    } do
+      start_supervised!(
+        {DurableServer.Supervisor,
+         name: supervisor_name,
+         prefix: prefix,
+         object_store: test_object_store_opts(),
+         max_children: %{RemotePlacementTestServer => 10}}
+      )
+
+      disabled_node = :zero_capacity_remote@test
+      heartbeat_table = :"durable_server_heartbeats_#{supervisor_name}"
+
+      :ets.insert(
+        heartbeat_table,
+        {to_string(disabled_node), System.unique_integer([:positive]),
+         System.system_time(:millisecond),
+         %{
+           RemotePlacementTestServer => %{current: 0, limit: 0},
+           total: %{current: 0, limit: 100}
+         }, nil, %{}, %{}}
+      )
+
+      assert [] =
+               LifecycleManager.find_eligible_nodes(
+                 supervisor_name,
+                 RemotePlacementTestServer
+               )
+    end
+
     test "does not return a fallback node before its sticky placement gate opens", %{
       supervisor_name: supervisor_name,
       prefix: prefix
