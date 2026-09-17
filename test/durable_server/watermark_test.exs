@@ -108,6 +108,26 @@ defmodule DurableServer.WatermarkTest do
                )
     end
 
+    test "zero per-module capacity disables the module on the node", %{
+      supervisor_name: supervisor_name,
+      prefix: prefix
+    } do
+      start_supervised!(
+        {DurableServer.Supervisor,
+         name: supervisor_name,
+         prefix: prefix,
+         object_store: test_object_store_opts(),
+         max_children: %{WatermarkTestServer => 0}}
+      )
+
+      assert {:error, {:capacity_limit, :max_children_module}} =
+               DurableServer.Supervisor.start_child(
+                 supervisor_name,
+                 {WatermarkTestServer, key: "disabled", initial_state: %{}},
+                 max_placement_retries: 0
+               )
+    end
+
     test "enforces both global and per-module limits", %{
       supervisor_name: supervisor_name,
       prefix: prefix
@@ -346,6 +366,20 @@ defmodule DurableServer.WatermarkTest do
                   prefix: prefix,
                   object_store: test_object_store_opts(),
                   max_children: %{:total => 10, WatermarkTestServer => 5}}
+               )
+    end
+
+    test "accepts zero for a module-specific max_children entry", %{
+      supervisor_name: supervisor_name,
+      prefix: prefix
+    } do
+      assert {:ok, _pid} =
+               start_supervised(
+                 {DurableServer.Supervisor,
+                  name: supervisor_name,
+                  prefix: prefix,
+                  object_store: test_object_store_opts(),
+                  max_children: %{WatermarkTestServer => 0}}
                )
     end
 

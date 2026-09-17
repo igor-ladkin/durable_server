@@ -4118,7 +4118,7 @@ defmodule DurableServer.Supervisor do
       {:total, val} when is_integer(val) and val > 0 ->
         :ok
 
-      {mod, val} when is_atom(mod) and is_integer(val) and val > 0 ->
+      {mod, val} when is_atom(mod) and mod != :total and is_integer(val) and val >= 0 ->
         :ok
 
       other ->
