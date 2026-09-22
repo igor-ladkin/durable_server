@@ -4,6 +4,7 @@ defmodule DurableServer.Meta do
 
   defstruct vsn: 1,
             module: nil,
+            lock_epoch: 0,
             permanent: false,
             pid: nil,
             status: :stopped_graceful,
@@ -136,6 +137,14 @@ defmodule DurableServer.Meta do
 
     validate_field!(meta, :vsn, &(is_integer(&1) and &1 > 0), "a positive integer")
     validate_field!(meta, :module, &is_atom/1, "an atom")
+
+    validate_field!(
+      meta,
+      :lock_epoch,
+      &(is_integer(&1) and &1 >= 0),
+      "a non-negative integer"
+    )
+
     validate_field!(meta, :permanent, &is_boolean/1, "a boolean")
     validate_field!(meta, :pid, &(is_nil(&1) or is_pid(&1)), "a pid or nil")
     validate_field!(meta, :status, &(&1 in @statuses), "a supported status")

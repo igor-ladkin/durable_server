@@ -839,6 +839,7 @@ defmodule DurableServer do
             key: nil,
             prefix: nil,
             etag: nil,
+            lock_epoch: 0,
             pid: nil,
             preloaded_boot: false,
             bootstrapped: false,
@@ -1298,6 +1299,7 @@ defmodule DurableServer do
       preloaded_boot: preloaded_boot,
       vsn: config.vsn,
       etag: etag,
+      lock_epoch: next_lock_epoch(meta),
       old_vsn: old_vsn,
       user_state: user_state,
       module: module,
@@ -1342,19 +1344,6 @@ defmodule DurableServer do
     storage_key = prefix <> key
 
     Logger.info("delete: trying to aquire delete lock for #{storage_key}")
-    # first try to claim (object doesn't exist)
-    deleting_data = %StoredState{
-      vsn: 1,
-      state: %{},
-      meta: %DurableServer.Meta{
-        status: :deleting,
-        pid: nil,
-        node_str: Atom.to_string(Node.self()),
-        node_ref: nil,
-        last_heartbeat_at: System.system_time(:millisecond),
-        crash_history: []
-      }
-    }
 
     case StorageBackend.get_object(store, storage_key, consistent: true) do
       # object already deleted, so we proceed as normal
@@ -1400,7 +1389,7 @@ defmodule DurableServer do
                         {:error, {:deleting, etag}}
 
                       Meta.cordoned?(meta) ->
-                        {:ok, deleting_data}
+                        {:ok, delete_tombstone_stored_state(meta)}
 
                       true ->
                         {:error, {:locked, meta.pid}}
@@ -1420,7 +1409,7 @@ defmodule DurableServer do
                     if Meta.cordoned?(stored_state.meta) do
                       Logger.info("delete: #{storage_key} found to be cordoned, claimed key")
 
-                      {:ok, deleting_data}
+                      {:ok, delete_tombstone_stored_state(stored_state.meta)}
                     else
                       case check_lock(stored_state.meta, supervisor_name) do
                         :expired ->
@@ -1428,7 +1417,7 @@ defmodule DurableServer do
                             "delete: #{storage_key} found to be expired, claimed expired key"
                           )
 
-                          {:ok, deleting_data}
+                          {:ok, delete_tombstone_stored_state(stored_state.meta)}
 
                         {:locked, lock_pid} ->
                           Logger.info(
@@ -1469,6 +1458,7 @@ defmodule DurableServer do
              key: state.key,
              module: state.module,
              storage_key: storage_key(state),
+             lock_epoch: state.lock_epoch,
              node_ref: state.node_ref,
              start_time: state.start_time,
              user_meta: state.user_meta,
@@ -2737,6 +2727,7 @@ defmodule DurableServer do
 
   defp delete_tombstone_meta(%DurableServer{} = state, now_ms) when is_integer(now_ms) do
     %Meta{
+      lock_epoch: state.lock_epoch,
       status: :deleting,
       pid: nil,
       supervisor: nil,
@@ -2745,6 +2736,22 @@ defmodule DurableServer do
       node_str: state.node_str || to_string(Node.self()),
       last_heartbeat_at: now_ms,
       crash_history: []
+    }
+  end
+
+  defp delete_tombstone_stored_state(%Meta{} = previous_meta) do
+    %StoredState{
+      vsn: 1,
+      state: %{},
+      meta: %Meta{
+        lock_epoch: Map.get(previous_meta, :lock_epoch, 0),
+        status: :deleting,
+        pid: nil,
+        node_str: to_string(Node.self()),
+        node_ref: nil,
+        last_heartbeat_at: System.system_time(:millisecond),
+        crash_history: []
+      }
     }
   end
 
@@ -2821,6 +2828,7 @@ defmodule DurableServer do
     %Meta{
       key: state.key,
       prefix: state.prefix,
+      lock_epoch: state.lock_epoch,
       supervisor: state.supervisor,
       task_supervisor: state.task_supervisor,
       dynamic_supervisor: state.dynamic_supervisor,
@@ -2841,6 +2849,12 @@ defmodule DurableServer do
       init_from_ref: state.init_from_ref,
       init_from_pid: state.init_from_pid
     }
+  end
+
+  defp next_lock_epoch(nil), do: 1
+
+  defp next_lock_epoch(%Meta{} = meta) do
+    Map.get(meta, :lock_epoch, 0) + 1
   end
 
   defp put_restart_attempt(%DurableServer{} = state, restart_attempt_node, ttl_ms)
@@ -3879,7 +3893,10 @@ defmodule DurableServer do
             Meta.deleting?(meta) ->
               case delete_tombstone_lock_status(meta) do
                 :expired ->
-                  try_lock_object_via_update(%{state | etag: stored_state.etag}, data)
+                  lock_epoch = next_lock_epoch(meta)
+                  state = %{state | etag: stored_state.etag, lock_epoch: lock_epoch}
+                  data = %{data | meta: %{data.meta | lock_epoch: lock_epoch}}
+                  try_lock_object_via_update(state, data)
 
                 {:locked, :deleting} ->
                   {:error, {:already_started, :deleting}}

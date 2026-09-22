@@ -2762,6 +2762,9 @@ defmodule DurableServerTest do
            }}
         )
 
+      assert {^pid1, %DurableServer.GroupMeta{lock_epoch: 1}} =
+               Group.lookup(supervisor_name, key, extract_meta: & &1)
+
       # Verify it's running and increment count (this should sync due to auto_sync: true)
       assert GenServer.call(pid1, :increment) == 1
       assert GenServer.call(pid1, :get_count) == 1
@@ -2802,6 +2805,12 @@ defmodule DurableServerTest do
              }
            }}
         )
+
+      assert {^pid2, %DurableServer.GroupMeta{lock_epoch: 2}} =
+               Group.lookup(supervisor_name, key, extract_meta: & &1)
+
+      {:ok, %StoredState{meta: %Meta{lock_epoch: 2}}} =
+        DurableServer.fetch_stored_state(store, %{key: key, prefix: prefix}, consistent: true)
 
       # Let's check what the second server actually loaded
       actual_count = GenServer.call(pid2, :get_count)
@@ -4451,6 +4460,7 @@ defmodule DurableServerTest do
         vsn: 1,
         state: %{count: 7},
         meta: %Meta{
+          lock_epoch: 17,
           status: :cordoned,
           module: TestServer,
           pid: nil,
@@ -4470,6 +4480,7 @@ defmodule DurableServerTest do
                       %StoredState{
                         state: %{},
                         meta: %Meta{
+                          lock_epoch: 17,
                           status: :deleting,
                           pid: nil,
                           module: nil,
@@ -4726,6 +4737,7 @@ defmodule DurableServerTest do
         vsn: 1,
         state: %{},
         meta: %Meta{
+          lock_epoch: 7,
           status: :deleting,
           pid: self(),
           supervisor: nil,
@@ -4755,6 +4767,7 @@ defmodule DurableServerTest do
 
       assert stored_state.meta.status == :running
       assert stored_state.meta.pid == pid
+      assert stored_state.meta.lock_epoch == 8
       assert atomify_keys(stored_state.state).count == 41
     end
 
@@ -5062,12 +5075,14 @@ defmodule DurableServerTest do
                )
 
       assert stored_state.meta.status == :deleting
+      assert stored_state.meta.lock_epoch == 1
 
       [{{:data, ^storage_key}, %{body: raw_stored_state}}] =
         :ets.lookup(table, {:data, storage_key})
 
       assert raw_stored_state.state == %{}
       assert raw_stored_state.meta.status == :deleting
+      assert raw_stored_state.meta.lock_epoch == 1
       assert raw_stored_state.meta.pid == nil
       assert raw_stored_state.meta.module == nil
       assert raw_stored_state.meta.node_ref == nil

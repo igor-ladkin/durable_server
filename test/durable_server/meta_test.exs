@@ -9,6 +9,7 @@ defmodule DurableServer.MetaTest do
   test "round-trips valid metadata through the hardened decoder" do
     meta = %Meta{
       module: __MODULE__,
+      lock_epoch: 42,
       permanent: true,
       pid: self(),
       status: :running,
@@ -26,6 +27,17 @@ defmodule DurableServer.MetaTest do
     decoded = meta |> Meta.encode_to_binary() |> Meta.decode_from_binary(@context)
 
     assert decoded == %{meta | key: @context.key, prefix: @context.prefix}
+  end
+
+  test "defaults metadata written before lock epochs to zero" do
+    encoded =
+      %Meta{module: __MODULE__, status: :running}
+      |> Meta.to_storage_term()
+      |> Map.delete(:lock_epoch)
+      |> :erlang.term_to_binary()
+      |> Base.encode64()
+
+    assert %Meta{lock_epoch: 0} = Meta.decode_from_binary(encoded, @context)
   end
 
   test "decodes persisted metadata atoms that do not exist in the current VM" do
@@ -63,6 +75,17 @@ defmodule DurableServer.MetaTest do
       |> Base.encode64()
 
     assert_raise ArgumentError, ~r/invalid metadata field :permanent/, fn ->
+      Meta.decode_from_binary(encoded, @context)
+    end
+  end
+
+  test "rejects negative lock epochs" do
+    encoded =
+      %{module: __MODULE__, status: :running, lock_epoch: -1}
+      |> :erlang.term_to_binary()
+      |> Base.encode64()
+
+    assert_raise ArgumentError, ~r/invalid metadata field :lock_epoch/, fn ->
       Meta.decode_from_binary(encoded, @context)
     end
   end

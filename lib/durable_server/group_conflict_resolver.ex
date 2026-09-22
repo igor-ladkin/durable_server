@@ -5,67 +5,44 @@ defmodule DurableServer.GroupConflictResolver do
   DurableServer-specific conflict resolution for group registry conflicts.
 
   When a network partition heals or race conditions occur, multiple processes may
-  have claimed the same key. Since DurableServers use object storage as a distributed
-  lock, registry conflicts are extremely rare in practice. When they do occur, we
-  kill both processes and let the system restart cleanly — the storage lock ensures
-  only one will successfully re-acquire the key.
+  have claimed the same key. DurableServers use object storage as the ownership
+  authority: every successful lock acquisition advances a monotonically increasing
+  lock epoch in the same conditional write that acquires the lock.
 
-  This callback runs synchronously inside the Group shard GenServer, so it must
-  never block. We intentionally avoid any synchronous work (no GenServer.call to
-  the conflicting processes, no storage lookups) and just kill both immediately.
+  Current Group conflict resolvers are pure rank functions. Ranking by lock epoch
+  lets Group retain the latest successful storage claimant and authoritatively
+  retire only stale owners after validating its replicated view. The current
+  resolver must not terminate either claimant: doing so before Group commits the
+  losing unregister can create a repeated anti-entropy death loop.
+
+  The legacy pairwise Group API delegates loser termination to the resolver. Its
+  compatibility callback uses the same deterministic rank and terminates only
+  the loser, never both owners.
 
   This module is registered as the `:resolve_registry_conflict` callback for
   Group instances started by DurableServer.Supervisor.
   """
 
-  require Logger
-
   alias DurableServer.GroupMeta
 
-  # Group 0.2.1 ranks each claim independently and terminates the local loser.
-  # DurableServer still terminates every conflicting owner so the object-store
-  # lock, rather than eventually consistent registry metadata, selects the
-  # process that may restart.
-  def resolve(name, key, {pid, %GroupMeta{}, time}) do
-    Logger.error(fn ->
-      "#{inspect(__MODULE__)}: registry conflict detected: " <>
-        "name=#{inspect(name)}, key=#{inspect(key)}, " <>
-        "pid=#{inspect(pid)}, terminating owner for clean restart"
-    end)
-
-    DurableServer.fatal_exit!(pid, :registry_conflict)
-    {time, pid}
+  def resolve(_name, _key, {pid, %GroupMeta{} = meta, time}) do
+    {Map.get(meta, :lock_epoch, 0), time, pid}
   end
 
-  def resolve(_name, _key, {pid, _meta, time}), do: {time, pid}
+  def resolve(_name, _key, {pid, _meta, time}), do: {0, time, pid}
 
-  def resolve(name, key, {pid1, %GroupMeta{}, _time1}, {pid2, %GroupMeta{}, _time2}) do
-    Logger.error(fn ->
-      "#{inspect(__MODULE__)}: registry conflict detected: " <>
-        "name=#{inspect(name)}, key=#{inspect(key)}, " <>
-        "pid1=#{inspect(pid1)}, pid2=#{inspect(pid2)}, killing both for clean restart"
-    end)
+  # Compatibility with Group 0.2.x's pairwise resolver API, which expects a
+  # custom resolver to terminate the loser itself. Both sides compute the same
+  # winner, so only the stale owner is ever terminated.
+  def resolve(name, key, {pid1, meta1, _time1} = claim1, {pid2, meta2, _time2} = claim2) do
+    {winner_pid, winner_meta, loser_pid} =
+      if resolve(name, key, claim2) > resolve(name, key, claim1) do
+        {pid2, meta2, pid1}
+      else
+        {pid1, meta1, pid2}
+      end
 
-    DurableServer.fatal_exit!(pid1, :registry_conflict)
-    DurableServer.fatal_exit!(pid2, :registry_conflict)
-
-    # Return pid1 as nominal "winner" — both are killed, so Group will briefly
-    # keep pid1's entry until its DOWN handler fires and cleans up the key.
-    pid1
-  end
-
-  # Non-DurableServer keys (e.g. sprite cache entries) — fall back to Group's
-  # default behavior: most recent timestamp wins, pid ordering as tiebreaker.
-  def resolve(_name, key, {pid1, _meta1, time1}, {pid2, meta2, time2}) do
-    {winner_pid, loser_pid} =
-      if time2 > time1 or (time2 == time1 and pid2 > pid1), do: {pid2, pid1}, else: {pid1, pid2}
-
-    Logger.error(fn ->
-      "#{inspect(__MODULE__)}: registry conflict detected: key=#{inspect(key)}, " <>
-        "pid1=#{inspect(pid1)}, pid2=#{inspect(pid2)}, picking #{inspect(winner_pid)} as winner"
-    end)
-
-    Process.exit(loser_pid, {:group_registry_conflict, key, meta2})
+    Process.exit(loser_pid, {:group_registry_conflict, key, winner_meta})
     winner_pid
   end
 end

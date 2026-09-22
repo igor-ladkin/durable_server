@@ -5,6 +5,7 @@ defmodule DurableServer.GroupMeta do
   defstruct key: nil,
             module: nil,
             storage_key: nil,
+            lock_epoch: 0,
             node_ref: nil,
             start_time: nil,
             user_meta: nil,

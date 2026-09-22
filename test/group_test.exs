@@ -686,75 +686,61 @@ defmodule GroupTest do
   end
 
   describe "GroupConflictResolver" do
-    test "per-claim resolver terminates every conflicting DurableServer owner", %{
+    test "per-claim resolver ranks the latest storage claimant without terminating either owner",
+         %{supervisor_name: sup} do
+      key = "conflict/test/#{DurableServer.UUID.uuid4()}"
+      older_pid = spawn(fn -> Process.sleep(:infinity) end)
+      newer_pid = spawn(fn -> Process.sleep(:infinity) end)
+      older_ref = Process.monitor(older_pid)
+      newer_ref = Process.monitor(newer_pid)
+
+      older_rank =
+        DurableServer.GroupConflictResolver.resolve(
+          sup,
+          key,
+          {older_pid, %DurableServer.GroupMeta{lock_epoch: 41}, 200}
+        )
+
+      newer_rank =
+        DurableServer.GroupConflictResolver.resolve(
+          sup,
+          key,
+          {newer_pid, %DurableServer.GroupMeta{lock_epoch: 42}, 100}
+        )
+
+      assert older_rank == {41, 200, older_pid}
+      assert newer_rank == {42, 100, newer_pid}
+      assert newer_rank > older_rank
+      refute_receive {:DOWN, ^older_ref, :process, ^older_pid, _}, 50
+      refute_receive {:DOWN, ^newer_ref, :process, ^newer_pid, _}, 50
+
+      Process.exit(older_pid, :kill)
+      Process.exit(newer_pid, :kill)
+    end
+
+    test "pairwise compatibility resolver terminates only the stale storage claimant", %{
       supervisor_name: sup
     } do
       key = "conflict/test/#{DurableServer.UUID.uuid4()}"
+      older_pid = spawn(fn -> Process.sleep(:infinity) end)
+      newer_pid = spawn(fn -> Process.sleep(:infinity) end)
+      older_ref = Process.monitor(older_pid)
+      newer_ref = Process.monitor(newer_pid)
 
-      {:ok, {pid, _}} =
-        DurableServer.Supervisor.start_child(
-          sup,
-          {TestServer, key: key, initial_state: %{}}
-        )
-
-      {^pid, meta} = Group.lookup(sup, key, extract_meta: & &1)
-      fake_pid = spawn(fn -> Process.sleep(:infinity) end)
-      ref_real = Process.monitor(pid)
-      ref_fake = Process.monitor(fake_pid)
-      time = System.system_time()
-
-      assert {^time, ^pid} =
-               DurableServer.GroupConflictResolver.resolve(sup, key, {pid, meta, time})
-
-      assert {time, fake_pid} ==
+      assert newer_pid ==
                DurableServer.GroupConflictResolver.resolve(
                  sup,
                  key,
-                 {fake_pid, %DurableServer.GroupMeta{}, time}
+                 {older_pid, %DurableServer.GroupMeta{lock_epoch: 8}, 200},
+                 {newer_pid, %DurableServer.GroupMeta{lock_epoch: 9}, 100}
                )
 
-      assert_receive {:DOWN, ^ref_real, :process, ^pid, _}, 1000
-      assert_receive {:DOWN, ^ref_fake, :process, ^fake_pid, _}, 1000
-    end
+      assert_receive {:DOWN, ^older_ref, :process, ^older_pid,
+                      {:group_registry_conflict, ^key, %DurableServer.GroupMeta{lock_epoch: 9}}},
+                     1_000
 
-    test "conflict resolver kills both processes for clean restart", %{supervisor_name: sup} do
-      key = "conflict/test/#{DurableServer.UUID.uuid4()}"
-
-      {:ok, {pid, _}} =
-        DurableServer.Supervisor.start_child(
-          sup,
-          {TestServer, key: key, initial_state: %{}}
-        )
-
-      # Get the raw internal metadata (bypassing extract_meta)
-      {^pid, meta} = Group.lookup(sup, key, extract_meta: & &1)
-
-      # Spawn a fake "conflicting" process
-      fake_pid = spawn(fn -> Process.sleep(:infinity) end)
-      ref_real = Process.monitor(pid)
-      ref_fake = Process.monitor(fake_pid)
-
-      time = System.system_time()
-
-      # Call the conflict resolver directly — this is what Group.Replica
-      # calls during partition healing when it detects a conflict.
-      config = Group.get_config(sup)
-      {mod, func, extra_args} = config.resolve_registry_conflict
-
-      winner =
-        apply(mod, func, [
-          sup,
-          key,
-          {pid, meta, time},
-          {fake_pid, %DurableServer.GroupMeta{}, time + 1} | extra_args
-        ])
-
-      # Resolver returns first pid as nominal winner (both are killed anyway)
-      assert winner == pid
-
-      # Both processes are killed for clean restart
-      assert_receive {:DOWN, ^ref_real, :process, ^pid, _}, 1000
-      assert_receive {:DOWN, ^ref_fake, :process, ^fake_pid, _}, 1000
+      refute_receive {:DOWN, ^newer_ref, :process, ^newer_pid, _}, 50
+      Process.exit(newer_pid, :kill)
     end
   end
 end
