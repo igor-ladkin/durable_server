@@ -9,6 +9,24 @@ defmodule DurableServer.PlacementTestServer do
     {:ok, pid}
   end
 
+  # Observe the budget actually sent over RPC without sleeping for multi-second
+  # deadlines or exposing a production API solely for checking timeout arithmetic.
+  # The tracer and trace pattern live only on this test's disposable peer node.
+  def trace_start_timeouts(observer) do
+    tracer = spawn(fn -> forward_start_timeouts(observer) end)
+    :erlang.trace_pattern({DurableServer.Supervisor, :__start_child__, 3}, true, [])
+    :erlang.trace(:new, true, [:call, {:tracer, tracer}])
+    :ok
+  end
+
+  defp forward_start_timeouts(observer) do
+    receive do
+      {:trace, _pid, :call, {DurableServer.Supervisor, :__start_child__, [_sup, _spec, opts]}} ->
+        send(observer, {:placement_start_timeout, Keyword.fetch!(opts, :timeout)})
+        forward_start_timeouts(observer)
+    end
+  end
+
   @impl true
   def init(state, info) do
     if state[:blocked] do

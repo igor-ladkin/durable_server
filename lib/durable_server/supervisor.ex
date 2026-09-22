@@ -252,7 +252,7 @@ defmodule DurableServer.Supervisor do
   @placement_candidate_pool_multiplier 4
   @placement_candidate_pool_min 10
   @placement_node_timeout_cooldown_ms :timer.seconds(15)
-  @placement_erpc_response_headroom_ms 250
+  @placement_erpc_response_headroom_ms 1_000
   @placement_erpc_timeout_same_region_ms 3_000
   @placement_erpc_timeout_cross_region_ms 8_000
   @restart_claim_race_poll_ms 100
@@ -1872,8 +1872,10 @@ defmodule DurableServer.Supervisor do
 
     # Let a slow bootstrap return its ordinary timeout before the enclosing RPC
     # expires and penalizes every key on this node with a transport cooldown.
-    # Reserve up to 250ms, or half a short budget rounded up. A budget too small
-    # for both startup and a reply must not dispatch a remote start.
+    # The outer timer starts before remote execution, so reserve time for transit
+    # in both directions and scheduling, not just the reply. One second is a
+    # conservative allowance, not a measured latency bound; cap it at half a
+    # short budget rounded up. If no startup budget remains, do not dispatch.
     response_headroom_ms =
       min(@placement_erpc_response_headroom_ms, div(erpc_timeout_ms + 1, 2))
 

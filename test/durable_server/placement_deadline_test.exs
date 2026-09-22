@@ -19,8 +19,9 @@ defmodule DurableServer.PlacementDeadlineTest do
     :ok
   end
 
-  setup do
+  setup context do
     suffix = "#{System.pid()}_#{System.unique_integer([:positive])}"
+    rpc_timeout = Map.get(context, :placement_rpc_timeout_ms, 500)
 
     {:ok, peer, remote_node} =
       :peer.start_link(%{
@@ -44,8 +45,8 @@ defmodule DurableServer.PlacementDeadlineTest do
       backend: {TestInMemoryBackend, []},
       initial_discovery_delay_ms: 60_000,
       graceful_shutdown_timeout_ms: 500,
-      placement_erpc_timeout_same_region_ms: 500,
-      placement_erpc_timeout_cross_region_ms: 500
+      placement_erpc_timeout_same_region_ms: rpc_timeout,
+      placement_erpc_timeout_cross_region_ms: rpc_timeout
     ]
 
     {:ok, _} =
@@ -62,6 +63,25 @@ defmodule DurableServer.PlacementDeadlineTest do
     advertise_remote(supervisor, remote_node)
 
     %{supervisor: supervisor, remote_node: remote_node, peer: peer}
+  end
+
+  for {rpc_timeout, start_timeout} <- [{500, 250}, {3_000, 2_000}, {8_000, 7_000}] do
+    @tag placement_rpc_timeout_ms: rpc_timeout
+    test "reserves the expected reply headroom for a #{rpc_timeout}ms RPC", context do
+      %{supervisor: supervisor, remote_node: remote_node} = context
+      :ok = :erpc.call(remote_node, PlacementTestServer, :trace_start_timeouts, [self()])
+
+      assert {:ok, {pid, _meta}} =
+               DurableSupervisor.start_child(
+                 supervisor,
+                 {PlacementTestServer, key: "budget", initial_state: %{}},
+                 timeout: 10_000,
+                 max_placement_retries: 1
+               )
+
+      assert node(pid) == remote_node
+      assert_receive {:placement_start_timeout, unquote(start_timeout)}, 1_000
+    end
   end
 
   test "slow bootstrap does not cool down its reachable node or block another key", context do
