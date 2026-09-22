@@ -1,7 +1,7 @@
 defmodule DurableServer.PlacementDeadlineTest do
   use ExUnit.Case, async: false
 
-  alias DurableServer.{LifecycleManager, PlacementTestBackend, PlacementTestServer}
+  alias DurableServer.{LifecycleManager, PlacementTestServer, TestInMemoryBackend}
   alias DurableServer.Supervisor, as: DurableSupervisor
 
   @moduletag :capture_log
@@ -41,7 +41,7 @@ defmodule DurableServer.PlacementDeadlineTest do
     opts = [
       name: supervisor,
       prefix: "placement-deadline/#{suffix}/",
-      backend: {PlacementTestBackend, []},
+      backend: {TestInMemoryBackend, []},
       initial_discovery_delay_ms: 60_000,
       graceful_shutdown_timeout_ms: 500,
       placement_erpc_timeout_same_region_ms: 500,

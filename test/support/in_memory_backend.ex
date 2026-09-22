@@ -1,18 +1,28 @@
-defmodule DurableServer.PlacementTestBackend do
+defmodule DurableServer.TestInMemoryBackend do
   @moduledoc """
-  Node-local storage for placement tests that do not need object storage.
+  Node-local storage shared by backend configuration and placement tests.
 
-  Only the selected remote node has child capacity in these tests, so all
-  durable child writes go to that node's table. This is not a distributed
-  storage implementation and must not be used to test competing claims.
+  Each instance owns an independent ETS table. Claims are create-only, but
+  updates do not enforce compare-and-swap options. This is not distributed
+  storage and must not be used to test competing owners across nodes.
   """
   @behaviour DurableServer.StorageBackend
 
   @impl true
-  def init_backend(_opts) do
+  def init_backend(raw_opts) do
+    opts =
+      case raw_opts do
+        %{} = map -> map
+        opts when is_list(opts) -> Map.new(opts)
+        other -> %{raw_opts: other}
+      end
+
     {:ok,
      %{
-       state: :ets.new(__MODULE__, [:set, :public]),
+       state: %{
+         table: :ets.new(__MODULE__, [:set, :public]),
+         name: Map.get(opts, :name)
+       },
        defaults: %{
          heartbeat_tracking_mode: :poll,
          discovery_interval_ms: 60_000,
@@ -23,10 +33,10 @@ defmodule DurableServer.PlacementTestBackend do
   end
 
   @impl true
-  def ensure_ready(_table), do: :ok
+  def ensure_ready(_state), do: :ok
 
   @impl true
-  def get_object(table, key, _opts) do
+  def get_object(%{table: table}, key, _opts) do
     case :ets.lookup(table, key) do
       [{^key, object}] -> {:ok, object}
       [] -> {:error, :not_found}
@@ -34,14 +44,14 @@ defmodule DurableServer.PlacementTestBackend do
   end
 
   @impl true
-  def put_object(table, key, body, _opts) do
+  def put_object(%{table: table}, key, body, _opts) do
     object = %{body: body, etag: etag()}
     true = :ets.insert(table, {key, object})
-    {:ok, %{etag: object.etag}}
+    {:ok, object}
   end
 
   @impl true
-  def try_claim(table, key, body) do
+  def try_claim(%{table: table}, key, body) do
     object = %{body: body, etag: etag()}
 
     if :ets.insert_new(table, {key, object}),
@@ -50,15 +60,15 @@ defmodule DurableServer.PlacementTestBackend do
   end
 
   @impl true
-  def update_object(table, key, fun, opts) do
-    with {:ok, object} <- get_object(table, key, opts),
+  def update_object(state, key, fun, opts) do
+    with {:ok, object} <- get_object(state, key, opts),
          {:ok, body} <- fun.(object) do
-      put_object(table, key, body, opts)
+      put_object(state, key, body, opts)
     end
   end
 
   @impl true
-  def delete_object(table, key) do
+  def delete_object(%{table: table}, key) do
     case :ets.take(table, key) do
       [] -> {:error, :not_found}
       [_object] -> :ok
@@ -66,7 +76,7 @@ defmodule DurableServer.PlacementTestBackend do
   end
 
   @impl true
-  def list_all_objects_stream(table, prefix, _opts) do
+  def list_all_objects_stream(%{table: table}, prefix, _opts) do
     table
     |> :ets.tab2list()
     |> Stream.filter(fn {key, _object} -> String.starts_with?(key, prefix) end)
@@ -74,10 +84,10 @@ defmodule DurableServer.PlacementTestBackend do
   end
 
   @impl true
-  def encode(_table, value), do: {:ok, value}
+  def encode(_state, value), do: {:ok, value}
 
   @impl true
-  def decode(_table, value), do: {:ok, value}
+  def decode(_state, value), do: {:ok, value}
 
   defp etag, do: Integer.to_string(System.unique_integer([:positive, :monotonic]))
 end
